@@ -14,9 +14,6 @@ Lib/
 *.log
 log_gagal_akses.txt
 
-# proxy credentials
-proxy/ip_list.txt
-
 # output
 output/
 
