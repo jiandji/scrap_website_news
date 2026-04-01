@@ -1,0 +1,26 @@
+# python
+__pycache__/
+*.pyc
+
+# virtual environment
+venv/
+env/
+Lib/
+
+# data
+*.csv
+
+# logs
+*.log
+log_gagal_akses.txt
+
+# proxy credentials
+proxy/ip_list.txt
+
+# output
+output/
+
+# vscode
+.vscode/
+
+check_links
