@@ -100,3 +100,5 @@ Kegagalan akses tercatat di `log_gagal_akses.txt` dengan kategori:
 | `DNS_ERROR` | Domain tidak aktif / salah |
 | `TIMEOUT` | Server tidak merespons dalam 15 detik |
 | `CONN_REFUSED` | Server menolak koneksi |
+
+gege geming
