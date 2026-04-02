@@ -5,6 +5,5 @@ nest_asyncio
 requests
 beautifulsoup4
 openpyxl
-transformers
-ollama
 tqdm
+aiofiles
