@@ -45,6 +45,7 @@ class UniversalNewsSpider(scrapy.Spider):
         },
         'ITEM_PIPELINES': {
             'middlewares.DeduplicatePipeline': 300,
+            'middlewares.SQLiteBackupPipeline': 400,
         }
     }
 

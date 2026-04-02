@@ -17,6 +17,9 @@ log_gagal_akses.txt
 # output
 output/
 
+# env
+.env
+
 # vscode
 .vscode/
 

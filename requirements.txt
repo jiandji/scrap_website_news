@@ -7,3 +7,5 @@ beautifulsoup4
 openpyxl
 tqdm
 aiofiles
+psycopg2-binary
+python-dotenv

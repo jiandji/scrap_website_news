@@ -1,6 +1,12 @@
 import random
 import os
+import sqlite3
+import json
+from datetime import datetime
 from scrapy.exceptions import DropItem
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 """
@@ -44,7 +50,118 @@ class HumanBehaviorMiddleware:
         
 
 """
-Early sort deduplicate news by media_name + title 
+SQLite Backup Pipeline - simpan setiap artikel ke SQLite lokal
+Sync ke PostgreSQL saat spider selesai
+"""
+
+class SQLiteBackupPipeline:
+    def open_spider(self, spider):
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        os.makedirs('output/backup', exist_ok=True)
+        self.db_path = f'output/backup/hasil_berita_{date_str}.db'
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS website_scraping (
+                scraping_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                media_name TEXT,
+                title TEXT,
+                content TEXT,
+                news_link TEXT UNIQUE,
+                news_date TEXT,
+                author TEXT,
+                crawled_at TEXT,
+                synced INTEGER DEFAULT 0
+            )
+        """)
+        self.conn.commit()
+
+    def process_item(self, item, spider):
+        try:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO website_scraping
+                   (media_name, title, content, news_link, news_date, author, crawled_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    item.get('media_name'),
+                    item.get('title'),
+                    item.get('content'),
+                    item.get('news_link'),
+                    item.get('news_date'),
+                    item.get('author'),
+                    item.get('news_date_crawled'),
+                )
+            )
+            self.conn.commit()
+        except Exception as e:
+            spider.logger.error(f"SQLite error: {e}")
+        return item
+
+    def close_spider(self, spider):
+        self._sync_to_postgres(spider)
+        self.conn.close()
+
+    def _sync_to_postgres(self, spider):
+        pg_host = os.getenv('POSTGRES_HOST')
+        if not pg_host:
+            spider.logger.info("PostgreSQL not configured, skipping sync. Data safe in SQLite.")
+            return
+
+        try:
+            import psycopg2
+            pg_conn = psycopg2.connect(
+                host=pg_host,
+                port=os.getenv('POSTGRES_PORT', '5432'),
+                dbname=os.getenv('POSTGRES_DB'),
+                user=os.getenv('POSTGRES_USER'),
+                password=os.getenv('POSTGRES_PASSWORD'),
+            )
+            cur = pg_conn.cursor()
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS website_scraping (
+                    scraping_id SERIAL PRIMARY KEY,
+                    media_name TEXT,
+                    title TEXT,
+                    content TEXT,
+                    news_link TEXT UNIQUE,
+                    news_date TIMESTAMP,
+                    author TEXT,
+                    crawled_at TIMESTAMP
+                )
+            """)
+
+            unsynced = self.conn.execute(
+                "SELECT scraping_id, media_name, title, content, news_link, news_date, author, crawled_at "
+                "FROM website_scraping WHERE synced = 0"
+            ).fetchall()
+
+            synced_count = 0
+            for row in unsynced:
+                sid, media_name, title, content, news_link, news_date, author, crawled_at = row
+                try:
+                    cur.execute(
+                        """INSERT INTO website_scraping
+                           (media_name, title, content, news_link, news_date, author, crawled_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (news_link) DO NOTHING""",
+                        (media_name, title, content, news_link, news_date, author, crawled_at)
+                    )
+                    self.conn.execute("UPDATE website_scraping SET synced = 1 WHERE scraping_id = ?", (sid,))
+                    synced_count += 1
+                except Exception as e:
+                    spider.logger.error(f"PostgreSQL insert error: {e}")
+
+            pg_conn.commit()
+            self.conn.commit()
+            pg_conn.close()
+            spider.logger.info(f"Synced {synced_count}/{len(unsynced)} articles to PostgreSQL")
+
+        except Exception as e:
+            spider.logger.error(f"PostgreSQL connection failed, data safe in SQLite: {e}")
+
+
+"""
+Early sort deduplicate news by media_name + title
 """
 
 class DeduplicatePipeline:
