@@ -2,6 +2,8 @@ import scrapy
 from scrapy.crawler import CrawlerProcess
 import pandas as pd
 import os
+import re
+import json
 from datetime import datetime
 from newspaper import Article
 import nest_asyncio
@@ -127,37 +129,111 @@ class UniversalNewsSpider(scrapy.Spider):
                         meta=response.meta
                     )
 
+    def _extract_date(self, response, article):
+        """Fallback chain: newspaper3k → LD+JSON → meta tags → URL regex"""
+        # 1. newspaper3k
+        if article.publish_date:
+            return self._format_date(article.publish_date)
+
+        # 2. LD+JSON (application/ld+json)
+        ld_scripts = response.xpath('//script[@type="application/ld+json"]/text()').getall()
+        for script in ld_scripts:
+            try:
+                data = json.loads(script)
+                # handle list of ld+json objects
+                if isinstance(data, list):
+                    data = data[0]
+                date_str = data.get('datePublished') or data.get('dateCreated')
+                if date_str:
+                    return self._format_date(date_str)
+            except (json.JSONDecodeError, IndexError, AttributeError):
+                pass
+
+        # 3. Meta tags
+        meta_selectors = [
+            'meta[property="article:published_time"]::attr(content)',
+            'meta[name="publishdate"]::attr(content)',
+            'meta[name="publish-date"]::attr(content)',
+            'meta[property="og:updated_time"]::attr(content)',
+            'meta[name="date"]::attr(content)',
+        ]
+        for sel in meta_selectors:
+            val = response.css(sel).get()
+            if val:
+                return self._format_date(val.strip())
+
+        # 4. URL regex (e.g. /2026/04/02/ or /2026-04-02/)
+        match = re.search(r'/(\d{4})[/-](\d{2})[/-](\d{2})/', response.url)
+        if match:
+            return f"{match.group(1)}-{match.group(2)}-{match.group(3)} 00:00:00"
+
+        return None
+
+    def _extract_author(self, response, article):
+        """Fallback chain: newspaper3k → LD+JSON → meta tags"""
+        # 1. newspaper3k
+        if article.authors:
+            return ", ".join(article.authors)
+
+        # 2. LD+JSON
+        ld_scripts = response.xpath('//script[@type="application/ld+json"]/text()').getall()
+        for script in ld_scripts:
+            try:
+                data = json.loads(script)
+                if isinstance(data, list):
+                    data = data[0]
+                author = data.get('author')
+                if isinstance(author, dict):
+                    return author.get('name')
+                elif isinstance(author, list):
+                    names = [a.get('name', '') if isinstance(a, dict) else str(a) for a in author]
+                    return ", ".join(n for n in names if n)
+                elif isinstance(author, str) and author:
+                    return author
+            except (json.JSONDecodeError, IndexError, AttributeError):
+                pass
+
+        # 3. Meta tags
+        meta_selectors = [
+            'meta[property="article:author"]::attr(content)',
+            'meta[name="author"]::attr(content)',
+            'meta[name="dc.creator"]::attr(content)',
+        ]
+        for sel in meta_selectors:
+            val = response.css(sel).get()
+            if val and val.strip():
+                return val.strip()
+
+        return None
+
+    def _format_date(self, date_val):
+        """Format date value to string safely."""
+        if isinstance(date_val, datetime):
+            return date_val.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            parsed = datetime.fromisoformat(str(date_val).replace('Z', '+00:00'))
+            return parsed.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return str(date_val)
+
     def parse_article(self, response):
         try:
             article = Article(response.url)
             article.set_html(response.body)
             article.parse()
-            
-            # format article.publish_date in a safe way
-            date_berita = None
-            if article.publish_date:
-                if isinstance(article.publish_date, datetime):
-                    date_berita = article.publish_date.strftime("%Y-%m-%d %H:%M:%S")
-                else:
-                    try:
-                        parsed = datetime.fromisoformat(str(article.publish_date))
-                        date_berita = parsed.strftime("%Y-%m-%d %H:%M:%S")
-                    except ValueError:
-                        date_berita = str(article.publish_date)
 
             if article.text and len(article.text) > 50:
                 yield {
-                    #'id': hashlib.md5(response.url.encode('utf-8')).hexdigest(), # need to remove posgres will handle
                     'media_name': response.meta['media_name'],
                     'title': article.title,
                     'content': article.text,
                     'news_link': response.url,
                     'news_date_crawled': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'news_date': date_berita,
-                    'author': ", ".join(article.authors) if article.authors else None
+                    'news_date': self._extract_date(response, article),
+                    'author': self._extract_author(response, article),
                 }
         except Exception:
-            pass 
+            pass
 
     def handle_error(self, failure):
         request = failure.request
