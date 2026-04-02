@@ -117,18 +117,11 @@ class SQLiteBackupPipeline:
             )
             cur = pg_conn.cursor()
 
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS website_scraping (
-                    scraping_id SERIAL PRIMARY KEY,
-                    media_name TEXT,
-                    title TEXT,
-                    content TEXT,
-                    news_link TEXT UNIQUE,
-                    news_date TIMESTAMP,
-                    author TEXT,
-                    crawled_at TIMESTAMP
-                )
-            """)
+            # Build media_name -> media_id lookup from master table
+            cur.execute("SELECT media_id, media_name FROM master_pers_data")
+            rows = cur.fetchall()
+            id_map = {name: mid for mid, name in rows}
+            id_map_lower = {name.lower().strip(): mid for mid, name in rows}
 
             unsynced = self.conn.execute(
                 "SELECT scraping_id, media_name, title, content, news_link, news_date, author, crawled_at "
@@ -136,15 +129,25 @@ class SQLiteBackupPipeline:
             ).fetchall()
 
             synced_count = 0
+            skipped_count = 0
             for row in unsynced:
                 sid, media_name, title, content, news_link, news_date, author, crawled_at = row
+
+                # Resolve media_name -> media_id
+                media_id = id_map.get(media_name)
+                if not media_id:
+                    media_id = id_map_lower.get(media_name.lower().strip())
+                if not media_id:
+                    skipped_count += 1
+                    continue
+
                 try:
                     cur.execute(
                         """INSERT INTO website_scraping
-                           (media_name, title, content, news_link, news_date, author, crawled_at)
+                           (media_id, title, content, news_link, news_date, author, crawled_at)
                            VALUES (%s, %s, %s, %s, %s, %s, %s)
                            ON CONFLICT (news_link) DO NOTHING""",
-                        (media_name, title, content, news_link, news_date, author, crawled_at)
+                        (media_id, title, content, news_link, news_date, author, crawled_at),
                     )
                     self.conn.execute("UPDATE website_scraping SET synced = 1 WHERE scraping_id = ?", (sid,))
                     synced_count += 1
@@ -155,6 +158,8 @@ class SQLiteBackupPipeline:
             self.conn.commit()
             pg_conn.close()
             spider.logger.info(f"Synced {synced_count}/{len(unsynced)} articles to PostgreSQL")
+            if skipped_count:
+                spider.logger.warning(f"Skipped {skipped_count} articles (no matching media_id in master_pers_data)")
 
         except Exception as e:
             spider.logger.error(f"PostgreSQL connection failed, data safe in SQLite: {e}")
