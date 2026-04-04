@@ -1,0 +1,155 @@
+name: Daily News Scraper
+
+on:
+  schedule:
+    # Setiap hari jam 07:00 WIB (00:00 UTC)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Bisa dijalankan manual dari tab Actions
+
+permissions:
+  contents: write
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install NLTK data (newspaper3k)
+        run: python -c "import nltk; nltk.download('punkt_tab', quiet=True)"
+
+      - name: Create output directories
+        run: mkdir -p output/backup
+
+      - name: Record start time
+        id: timer
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Run scraper
+        id: scraper
+        env:
+          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          python main.py && echo "status=success" >> $GITHUB_OUTPUT || echo "status=failed" >> $GITHUB_OUTPUT
+
+      - name: Get today's date and stats
+        id: stats
+        run: |
+          TODAY=$(date +'%Y-%m-%d')
+          echo "today=$TODAY" >> $GITHUB_OUTPUT
+
+          OUTPUT_FILE="output/hasil_berita_${TODAY}.json"
+          if [ -f "$OUTPUT_FILE" ]; then
+            ARTICLES=$(wc -l < "$OUTPUT_FILE")
+          else
+            ARTICLES=0
+          fi
+          echo "articles=$ARTICLES" >> $GITHUB_OUTPUT
+
+          if [ -f "log_gagal_akses.txt" ]; then
+            ERRORS=$(grep -c "^\[" log_gagal_akses.txt 2>/dev/null || echo 0)
+          else
+            ERRORS=0
+          fi
+          echo "errors=$ERRORS" >> $GITHUB_OUTPUT
+
+          END=$(date +%s)
+          DURATION=$(( (END - ${{ steps.timer.outputs.start }}) / 60 ))
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+
+          echo "committed_at=$(date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+
+      - name: Update run_history.json
+        run: |
+          TODAY="${{ steps.stats.outputs.today }}"
+          STATUS="${{ steps.scraper.outputs.status }}"
+          ARTICLES="${{ steps.stats.outputs.articles }}"
+          ERRORS="${{ steps.stats.outputs.errors }}"
+          DURATION="${{ steps.stats.outputs.duration }}"
+          COMMITTED_AT="${{ steps.stats.outputs.committed_at }}"
+          OUTPUT_FILE="output/hasil_berita_${TODAY}.json"
+
+          python3 - <<EOF
+          import json, os
+
+          log_file = "run_history.json"
+          if os.path.exists(log_file):
+              with open(log_file, "r") as f:
+                  history = json.load(f)
+          else:
+              history = []
+
+          entry = {
+              "date": "${TODAY}",
+              "status": "${STATUS}",
+              "articles_scraped": int("${ARTICLES}"),
+              "errors_count": int("${ERRORS}"),
+              "duration_minutes": int("${DURATION}"),
+              "output_file": "${OUTPUT_FILE}",
+              "committed_at": "${COMMITTED_AT}"
+          }
+
+          # Update jika tanggal sudah ada, append jika baru
+          dates = [e["date"] for e in history]
+          if "${TODAY}" in dates:
+              history[dates.index("${TODAY}")] = entry
+          else:
+              history.append(entry)
+
+          # Simpan hanya 90 hari terakhir
+          history = sorted(history, key=lambda x: x["date"], reverse=True)[:90]
+
+          with open(log_file, "w") as f:
+              json.dump(history, f, indent=2, ensure_ascii=False)
+
+          print(f"run_history.json updated: {entry}")
+          EOF
+
+      - name: Commit and push output
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          TODAY="${{ steps.stats.outputs.today }}"
+
+          git add -f output/hasil_berita_${TODAY}.json 2>/dev/null || true
+          git add -f output/backup/hasil_berita_${TODAY}.db 2>/dev/null || true
+          git add -f log_gagal_akses.txt 2>/dev/null || true
+          git add run_history.json 2>/dev/null || true
+
+          if git diff --staged --quiet; then
+            echo "Tidak ada perubahan untuk di-commit."
+          else
+            git commit -m "chore: hasil crawling otomatis ${{ steps.stats.outputs.today }} (${{ steps.stats.outputs.articles }} artikel)"
+            git push origin main
+            echo "Berhasil push ke GitHub!"
+          fi
+
+      - name: Print summary
+        run: |
+          echo "## Hasil Crawling ${{ steps.stats.outputs.today }}" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ steps.scraper.outputs.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Artikel | ${{ steps.stats.outputs.articles }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Error | ${{ steps.stats.outputs.errors }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Durasi | ${{ steps.stats.outputs.duration }} menit |" >> $GITHUB_STEP_SUMMARY
+          echo "| Selesai | ${{ steps.stats.outputs.committed_at }} |" >> $GITHUB_STEP_SUMMARY
