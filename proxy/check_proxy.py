@@ -36,8 +36,8 @@ for _ in range(10):
 for t in threads:
     t.join()
 
-# Simpan proxy yang valid ke file untuk dipakai main.py & middlewares.py
-output_path = '../proxy_list.txt'
+# Fix: simpan ke ip_list.txt di folder yang sama (proxy/) agar middlewares.py bisa baca
+output_path = 'ip_list.txt'
 with open(output_path, 'w') as f:
     for proxy in valid_proxies:
         f.write(f"http://{proxy}\n")
